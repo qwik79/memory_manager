@@ -1,0 +1,9 @@
+[project]
+name = "memory-manager"
+version = "0.1.0"
+description = "Local tiered memory manager for LLM context extension"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
