@@ -24,6 +24,10 @@ The warm store is treated as the canonical durable memory after compaction. The 
 
 ## Quick example
 
+`TieredMemoryManager` is the main class you start with. It lives in
+`memory_manager/orchestrator.py` and is re-exported from `memory_manager`, so
+application code can import it directly:
+
 ```python
 from memory_manager import TieredMemoryManager, OllamaIntegration
 
@@ -41,6 +45,60 @@ context = manager.build_context_for_llm("What did we decide about warm storage?"
 
 ollama = OllamaIntegration(manager)
 system_prompt, tools = ollama.get_context_for_llm_call({"role": "user", "content": "Summarize the memory design."})
+```
+
+## How to wire it into a local LLM app
+
+The manager does not run Ollama or LM Studio for you. Instead, your app follows
+the same loop for any chat backend:
+
+1. Create one `TieredMemoryManager` per project/session.
+2. Save the incoming user message with `manager.add_user_message(...)`.
+3. Build the memory-aware system prompt with
+   `manager.build_context_for_llm(query=user_message)`.
+4. Send that system prompt plus the user message to your local model server.
+5. Save the assistant reply with `manager.add_assistant_message(...)`.
+6. Periodically call `manager.compact_hot_to_warm()` and
+   `manager.index_warm_to_cold()` so older chat turns become retrievable memory.
+
+### Ollama
+
+Start Ollama separately, then call its `/api/chat` endpoint with the memory
+context as the system message. A minimal runnable example is included:
+
+```bash
+python examples/ollama_chat.py "What do we remember about storage?" --model qwen2.5:7b
+```
+
+That script:
+
+- creates a `TieredMemoryManager`;
+- uses `OllamaIntegration.get_context_for_llm_call(...)` to prepare the system
+  prompt and tool definitions;
+- posts to `http://localhost:11434/api/chat`;
+- stores the assistant reply back into memory.
+
+### LM Studio
+
+Start LM Studio, load a model, enable the local server, then call its
+OpenAI-compatible `/v1/chat/completions` endpoint. A minimal runnable example is
+included:
+
+```bash
+python examples/lmstudio_chat.py "What do we remember about storage?" --model local-model
+```
+
+That script builds the memory context directly with
+`manager.build_context_for_llm(...)` and sends it as the system message to
+`http://localhost:1234/v1/chat/completions`.
+
+### Local smoke/demo script
+
+If you just want to see the memory tiers work without starting an LLM server,
+run:
+
+```bash
+python examples/basic_flow.py
 ```
 
 ## Development
