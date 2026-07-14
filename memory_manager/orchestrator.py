@@ -10,6 +10,7 @@ from .cold_store import ColdStoreManager
 from .eviction import EvictionManager
 from .hot_buffer import HotBufferManager
 from .models import MemorySession, RetrievalResult
+from .storage import safe_id
 from .summarizer import HeuristicSummarizer, Summarizer
 from .warm_store import WarmStoreManager
 
@@ -25,10 +26,15 @@ class TieredMemoryManager:
         base_paths: dict[str, str | Path] | None = None,
         summarizer: Summarizer | None = None,
     ):
-        self.session = MemorySession(session_id=session_id, project_name=project_name, pinned_summary=pinned_summary)
+        normalized_session_id = safe_id(session_id)
+        self.session = MemorySession(
+            session_id=normalized_session_id,
+            project_name=project_name,
+            pinned_summary=pinned_summary,
+        )
         paths = base_paths or {}
         self.active_context = ActiveContext(self.session)
-        self.hot_buffer = HotBufferManager(session_id, paths.get("hot"))
+        self.hot_buffer = HotBufferManager(normalized_session_id, paths.get("hot"))
         self.warm_store = WarmStoreManager(paths.get("warm"))
         self.cold_store = ColdStoreManager(paths.get("cold"))
         self.eviction_manager = EvictionManager(self.hot_buffer)
@@ -79,6 +85,8 @@ class TieredMemoryManager:
         """Index warm sections into the cold tier."""
         created: list[str] = []
         for section in self.warm_store.list_sections(self.session_id, include_indexed=include_indexed):
+            if include_indexed and section.get("indexed_at"):
+                self.cold_store.delete_chunks_for_source_section(self.session_id, section.get("section_id"))
             chunk_ids = self.cold_store.index_warm_section(section)
             if chunk_ids:
                 created.extend(chunk_ids)
@@ -96,10 +104,10 @@ class TieredMemoryManager:
         items: list[ContextItem] = []
         for entry in self.hot_buffer.get_entries(limit=20, relevance_min=0.0):
             priority = 5 + (5 if "high-priority" in entry.get("tags", []) else 0)
-            items.append(ContextItem(content=entry.get("content", ""), priority=priority))
+            items.append(ContextItem(content=self._format_hot_entry(entry), priority=priority))
         if query:
             for result in self.refresh_context(query, k=6):
-                items.append(ContextItem(content=result.content, priority=int(result.relevance * 10)))
+                items.append(ContextItem(content=self._format_retrieval_result(result), priority=int(result.relevance * 10)))
         return self.active_context.build_context(items, max_tokens=max_tokens)
 
     def maybe_offload(self, current_task: str = "") -> dict[str, Any]:
@@ -120,3 +128,28 @@ class TieredMemoryManager:
             )
             self.hot_buffer.mark_compacted(offload_ids)
         return {"offloaded": offload_ids, "pinned": pin_ids, "warm_section_id": section_id}
+
+    def _format_hot_entry(self, entry: dict[str, Any]) -> str:
+        metadata = [
+            "tier=hot",
+            f"id={entry.get('entry_id', '')}",
+            f"type={entry.get('entry_type', '')}",
+        ]
+        if entry.get("tags"):
+            metadata.append(f"tags={','.join(entry.get('tags', []))}")
+        if entry.get("created_at"):
+            metadata.append(f"created_at={entry.get('created_at')}")
+        return f"[Memory {' '.join(metadata)}]\n{entry.get('content', '')}"
+
+    def _format_retrieval_result(self, result: RetrievalResult) -> str:
+        metadata = [
+            f"source={result.source}",
+            f"id={result.identifier or ''}",
+            f"relevance={result.relevance:.3f}",
+        ]
+        if result.metadata.get("section_name"):
+            metadata.append(f"section={result.metadata['section_name']}")
+        tags = result.metadata.get("tags")
+        if tags:
+            metadata.append(f"tags={','.join(tags)}")
+        return f"[Memory {' '.join(metadata)}]\n{result.content}"

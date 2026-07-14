@@ -74,6 +74,18 @@ class ColdStoreManager:
             source_section_id=section.get("section_id"),
         )
 
+    def delete_chunks_for_source_section(self, session_id: str, source_section_id: str | None) -> int:
+        """Delete indexed chunks that came from a specific warm section."""
+        if not source_section_id:
+            return 0
+        deleted = 0
+        for path in self._index_dir(session_id).glob("*.json"):
+            data = read_json(path)
+            if data.get("source_section_id") == source_section_id:
+                path.unlink()
+                deleted += 1
+        return deleted
+
     def retrieve(
         self,
         session_id: str,
@@ -99,7 +111,12 @@ class ColdStoreManager:
                         source=f"cold://{data.get('session_id')}/{data.get('chunk_id')}",
                         identifier=data.get("chunk_id"),
                         content=data.get("content", ""),
-                        metadata={**data.get("metadata", {}), "tags": tags, "section_name": data.get("section_name")},
+                        metadata={
+                            **data.get("metadata", {}),
+                            "tags": tags,
+                            "section_name": data.get("section_name"),
+                            "source_section_id": data.get("source_section_id"),
+                        },
                         relevance=score,
                     )
                 )

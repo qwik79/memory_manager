@@ -24,9 +24,17 @@ def default_base_path(name: str) -> Path:
 def atomic_json_write(path: Path, data: dict[str, Any]) -> None:
     """Atomically write JSON by writing a temp file then replacing the target."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_file = tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        delete=False,
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    tmp_path = Path(tmp_file.name)
     try:
-        with tmp_path.open("w", encoding="utf-8") as f:
+        with tmp_file as f:
             json.dump(data, f, indent=2, default=str, sort_keys=True)
             f.write("\n")
             f.flush()
