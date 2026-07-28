@@ -34,6 +34,8 @@ class ActiveContext:
             sections.append(f"## Project Goals & Context\n{self.session.pinned_summary}")
         if self.session.current_task:
             sections.append(f"## Current Task\n{self.session.current_task}")
+        if self.session.memory_notes:
+            sections.append(f"## Memory Unit Notes\n{self.session.memory_notes}")
         if self.session.active_decisions:
             recent = self.session.active_decisions[-5:]
             decisions = "\n".join(

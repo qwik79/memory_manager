@@ -48,6 +48,7 @@ class MemorySession:
     active_decisions: list[dict[str, Any]] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
     completed_subtasks: list[str] = field(default_factory=list)
+    memory_notes: str = ""
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
@@ -103,6 +104,9 @@ class WarmSection:
     content: str
     source_entry_ids: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    relations: dict[str, list[str]] = field(
+        default_factory=lambda: {"parent_ids": [], "child_ids": [], "related_ids": []}
+    )
     created_at: float = field(default_factory=time.time)
     indexed_at: float | None = None
     schema_version: int = 1

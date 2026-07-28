@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import MemoryEntry
-from .storage import atomic_json_write, default_base_path, estimate_tokens, read_json, safe_id
+from .storage import atomic_json_write, default_hot_path, estimate_tokens, read_json, safe_id
 
 
 class HotBufferManager:
@@ -16,7 +16,7 @@ class HotBufferManager:
 
     def __init__(self, session_id: str, base_path: str | Path | None = None):
         self.session_id = safe_id(session_id)
-        self.base_path = Path(base_path) if base_path else default_base_path("llm_hot_buffer")
+        self.base_path = Path(base_path) if base_path else default_hot_path()
         self.base_path.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._init_file()

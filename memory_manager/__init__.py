@@ -6,7 +6,8 @@ from .hot_buffer import HotBufferManager
 from .models import MemoryEntry, MemorySession, MemoryTierConfig, RetrievalResult, WarmSection
 from .ollama_integration import OllamaIntegration
 from .orchestrator import TieredMemoryManager
-from .summarizer import HeuristicSummarizer
+from .summarizer import HeuristicSummarizer, OllamaSummarizer
+from .trigger import OffloadTrigger, TriggerConfig
 from .warm_store import WarmStoreManager
 
 __all__ = [
@@ -19,8 +20,11 @@ __all__ = [
     "MemorySession",
     "MemoryTierConfig",
     "OllamaIntegration",
+    "OllamaSummarizer",
+    "OffloadTrigger",
     "RetrievalResult",
     "TieredMemoryManager",
+    "TriggerConfig",
     "WarmSection",
     "WarmStoreManager",
 ]
