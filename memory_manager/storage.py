@@ -17,8 +17,20 @@ def safe_id(value: str | None, default: str = "default") -> str:
 
 
 def default_base_path(name: str) -> Path:
-    """Return an OS-friendly default base path for local memory state."""
-    return Path(tempfile.gettempdir()) / name
+    """Return a durable, OS-friendly base path for canonical memory state."""
+    root = Path(os.environ.get("MEMORY_MANAGER_HOME", Path.home() / ".local" / "share" / "memory_manager"))
+    return root / name
+
+
+def default_hot_path() -> Path:
+    """Prefer Linux tmpfs for the disposable hot tier, with a portable fallback."""
+    configured = os.environ.get("MEMORY_MANAGER_HOT_PATH")
+    if configured:
+        return Path(configured)
+    shared_memory = Path("/dev/shm")
+    if shared_memory.is_dir() and os.access(shared_memory, os.W_OK):
+        return shared_memory / "memory_manager"
+    return Path(tempfile.gettempdir()) / "memory_manager_hot"
 
 
 def atomic_json_write(path: Path, data: dict[str, Any]) -> None:

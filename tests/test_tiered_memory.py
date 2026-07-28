@@ -1,4 +1,4 @@
-from memory_manager import OllamaIntegration, TieredMemoryManager
+from memory_manager import OffloadTrigger, OllamaIntegration, TieredMemoryManager, TriggerConfig
 from memory_manager.storage import atomic_json_write, read_json
 
 
@@ -124,3 +124,48 @@ def test_retrieved_context_includes_memory_provenance(tmp_path):
     assert "source=warm://" in context or "source=cold://" in context
     assert "relevance=" in context
     assert section_id in context or "section=session_summary" in context
+
+
+def test_composite_trigger_hard_limit_and_semantic_seam():
+    hard = OffloadTrigger(TriggerConfig(context_size=10, token_soft_pct=0.5, token_hard_pct=0.8))
+    hard_result = hard.evaluate([{"content": "x" * 40}])
+    assert hard_result["should_offload"] is True
+    assert "hard token limit" in hard_result["reasons"]
+
+    composite = OffloadTrigger(TriggerConfig(context_size=1000))
+    result = composite.evaluate(
+        [{"content": "The tests are passing and this work is done"}],
+        pinned_embedding=[1.0, 0.0],
+        embed_fn=lambda _: [0.0, 1.0],
+    )
+    assert result["should_offload"] is True
+    assert "structural seam" in result["reasons"]
+    assert any(reason.startswith("semantic drift") for reason in result["reasons"])
+
+
+def test_distillation_updates_pinned_context_and_memory_notes(tmp_path):
+    class StructuredSummarizer:
+        def summarize_entries(self, entries, context=None):
+            return {
+                "summary": "The canonical design now uses composite offloading.",
+                "decisions": ["Use a hard token limit."],
+                "next_steps": ["Calibrate semantic drift."],
+                "facts": {"context_size": 8192},
+                "notes_for_core": "Check retrieval quality before changing stores.",
+                "confidence": 0.9,
+            }
+
+    manager = TieredMemoryManager(
+        "distillation",
+        base_paths={"hot": tmp_path / "hot", "warm": tmp_path / "warm", "cold": tmp_path / "cold"},
+        summarizer=StructuredSummarizer(),
+    )
+    manager.add_user_message("Distill this exchange")
+    section_id = manager.compact_hot_to_warm()
+    context = manager.build_context_for_llm()
+    section = manager.warm_store.get_section(manager.session_id, section_id)
+
+    assert "composite offloading" in context
+    assert "Check retrieval quality" in context
+    assert "Calibrate semantic drift" in context
+    assert section["relations"] == {"parent_ids": [], "child_ids": [], "related_ids": []}

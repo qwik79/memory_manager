@@ -11,14 +11,23 @@ A local-first, dependency-light refactor of the tiered LLM memory-manager ideas 
 | Tier 2 | `warm_store.py` | Persist canonical summarized sections on disk with provenance. |
 | Tier 3 | `cold_store.py` | Maintain a rebuildable long-term retrieval index over warm sections. |
 
-The warm store is treated as the canonical durable memory after compaction. The cold store is intentionally rebuildable and dependency-free for now; it uses lexical vectors rather than binding the core package to Chroma/Qdrant. A vector database adapter can later implement the same public methods.
+The hot store defaults to `/dev/shm/memory_manager` on Linux (and a temporary-directory
+fallback elsewhere). Warm and cold data default to
+`~/.local/share/memory_manager`, or `$MEMORY_MANAGER_HOME` when set, because those
+tiers are canonical and must survive a reboot. The cold store is intentionally
+rebuildable and dependency-free for now; it uses lexical vectors rather than binding
+the core package to Chroma/Qdrant. A vector database adapter can later implement the
+same public methods.
 
 ## Design choices preserved from the drafts
 
 - Pinned context that is always available to the main model.
 - Hot/warm/cold tiers inspired by OS memory hierarchy.
 - Structured entries with IDs, timestamps, tags, relevance hints, and source provenance.
-- Heuristic summarization as a safe fallback for a future secondary LLM.
+- Optional CPU-only Ollama distillation with heuristic summarization as a safe fallback.
+- Automatic offload decisions combining token pressure, semantic drift (when an
+  embedding callback is supplied), structural seams, and an unconditional hard limit.
+- Relational fields on canonical warm records for later graph-aware retrieval.
 - Explicit eviction scoring using recency, references, semantic/keyword overlap, and tags.
 - Ollama-style adapter that prepares a system prompt and memory tool definitions.
 
@@ -47,6 +56,27 @@ ollama = OllamaIntegration(manager)
 system_prompt, tools = ollama.get_context_for_llm_call({"role": "user", "content": "Summarize the memory design."})
 ```
 
+To enable the secondary memory model, pass an `OllamaSummarizer`. It requests JSON
+mode and forces CPU inference (`num_gpu=0`), so the primary model retains its VRAM.
+If Ollama is unavailable or returns invalid data, compaction transparently uses the
+deterministic heuristic fallback.
+
+```python
+from memory_manager import OllamaSummarizer, TieredMemoryManager, TriggerConfig
+
+manager = TieredMemoryManager(
+    session_id="demo",
+    summarizer=OllamaSummarizer(model="qwen2.5:1.5b"),
+    trigger_config=TriggerConfig(context_size=8192),
+)
+```
+
+`add_assistant_message()` evaluates the composite trigger after a completed exchange
+and automatically compacts when it fires. The most recent result is available as
+`manager.last_offload_result`. Pass `embed_fn(text) -> list[float]` to the manager to
+activate semantic drift; without it, token pressure and structural events remain fully
+functional. Explicit `compact_hot_to_warm()` calls are still supported.
+
 ## How to wire it into a local LLM app
 
 The manager does not run Ollama or LM Studio for you. Instead, your app follows
@@ -58,8 +88,9 @@ the same loop for any chat backend:
    `manager.build_context_for_llm(query=user_message)`.
 4. Send that system prompt plus the user message to your local model server.
 5. Save the assistant reply with `manager.add_assistant_message(...)`.
-6. Periodically call `manager.compact_hot_to_warm()` and
-   `manager.index_warm_to_cold()` so older chat turns become retrievable memory.
+6. Let the automatic composite trigger compact hot memory (or invoke compaction
+   explicitly), then periodically call `manager.index_warm_to_cold()` so canonical
+   warm sections become retrievable long-term memory.
 
 ### Ollama
 
