@@ -30,7 +30,8 @@ def test_hot_to_warm_to_cold_flow(tmp_path):
     assert section_id and section_id.startswith("warm_")
     assert manager.hot_buffer.get_entries() == []
 
-    chunks = manager.index_warm_to_cold()
+    # Auto-cascade already indexed this section; re-index with include_indexed=True
+    chunks = manager.index_warm_to_cold(include_indexed=True)
     assert chunks
 
     results = manager.refresh_context("canonical rebuildable storage")
@@ -76,7 +77,8 @@ def test_reindexing_warm_section_replaces_existing_cold_chunks(tmp_path):
 
     section_id = manager.compact_hot_to_warm()
     assert section_id
-    first_chunks = manager.index_warm_to_cold()
+    # Auto-cascade indexed first_chunks; re-index to get second_chunks
+    first_chunks = manager.index_warm_to_cold(include_indexed=True)
     second_chunks = manager.index_warm_to_cold(include_indexed=True)
 
     assert first_chunks
@@ -127,8 +129,9 @@ def test_retrieved_context_includes_memory_provenance(tmp_path):
 
 
 def test_composite_trigger_hard_limit_and_semantic_seam():
+    # Use real words: 7 words × 1.33 ≈ 9.3 tokens > 80% of context_size=10.
     hard = OffloadTrigger(TriggerConfig(context_size=10, token_soft_pct=0.5, token_hard_pct=0.8))
-    hard_result = hard.evaluate([{"content": "x" * 40}])
+    hard_result = hard.evaluate([{"content": "alpha beta gamma delta epsilon zeta eta"}])
     assert hard_result["should_offload"] is True
     assert "hard token limit" in hard_result["reasons"]
 

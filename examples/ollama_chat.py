@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from memory_manager import OllamaIntegration, TieredMemoryManager
+from memory_manager import LLMIntegration, TieredMemoryManager
 
 
 def post_json(url: str, payload: dict) -> dict:
@@ -37,32 +37,32 @@ def main() -> None:
     parser.add_argument("--session", default="ollama-demo", help="Memory session ID")
     args = parser.parse_args()
 
-    manager = TieredMemoryManager(
+    with TieredMemoryManager(
         session_id=args.session,
         project_name="Ollama memory demo",
         pinned_summary="Use local tiered memory to augment an Ollama chat request.",
-    )
-    manager.add_user_message(args.message)
+    ) as manager:
+        manager.add_user_message(args.message)
 
-    integration = OllamaIntegration(manager, primary_model=args.model)
-    system_prompt, tools = integration.get_context_for_llm_call(
-        {"role": "user", "content": args.message}
-    )
-    payload = {
-        "model": args.model,
-        "stream": False,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": args.message},
-        ],
-        "tools": tools,
-    }
+        integration = LLMIntegration(manager, primary_model=args.model)
+        system_prompt, tools = integration.get_context_for_llm_call(
+            {"role": "user", "content": args.message}
+        )
+        payload = {
+            "model": args.model,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": args.message},
+            ],
+            "tools": tools,
+        }
 
-    result = post_json(f"{args.host.rstrip('/')}/api/chat", payload)
-    answer = result.get("message", {}).get("content", "")
-    manager.add_assistant_message(answer)
-    manager.compact_hot_to_warm()
-    manager.index_warm_to_cold()
+        result = post_json(f"{args.host.rstrip('/')}/api/chat", payload)
+        answer = result.get("message", {}).get("content", "")
+        manager.add_assistant_message(answer)
+        # Auto-cascade handles warm→cold indexing automatically.
+        manager.compact_hot_to_warm()
 
     print(answer)
 

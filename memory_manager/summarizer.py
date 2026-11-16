@@ -16,9 +16,18 @@ class Summarizer(Protocol):
 class HeuristicSummarizer:
     """Deterministic fallback summarizer used when no secondary LLM is configured."""
 
+    _NEXT_STEP_RE = re.compile(
+        r"(?:TODO|next up|next step|next:|will need|need to|going to|should|plan to)"
+        r"\s*:?\s*([^\n.!?]{5,100})",
+        re.IGNORECASE,
+    )
+
     def summarize_entries(self, entries: list[dict[str, Any]], context: dict[str, Any] | None = None) -> dict[str, Any]:
         if not entries:
-            return {"summary": "", "decisions": [], "facts": {}, "confidence": 1.0}
+            return {
+                "summary": "", "decisions": [], "next_steps": [],
+                "facts": {}, "tier": "extend", "confidence": 1.0,
+            }
         content = "\n".join(e.get("content", "") for e in entries)
         lines = [line.rstrip() for line in content.splitlines() if line.strip()]
         if len(lines) <= 30:
@@ -26,13 +35,20 @@ class HeuristicSummarizer:
         else:
             summary = "\n".join(lines[:10] + ["...[middle compacted]..."] + lines[-10:])
         decisions = [line for line in lines if "decision" in line.lower() or "[pin]" in line.lower()]
+        next_steps = list(dict.fromkeys(
+            m.group(1).strip() for m in self._NEXT_STEP_RE.finditer(content)
+        ))[:10]
         paths = sorted(set(re.findall(r"(?:[\w.-]+/)+[\w.-]+", content)))
         facts = {"paths": paths} if paths else {}
+        tier = "pin" if decisions else ("archive" if re.search(r"\b(done|resolved|fixed|merged)\b", content, re.I) else "extend")
         confidence = self._estimate_confidence(content)
         return {
             "summary": summary,
             "decisions": decisions[:10],
+            "next_steps": next_steps,
             "facts": facts,
+            "tier": tier,
+            "notes_for_core": "",
             "source_entry_ids": [e.get("entry_id") for e in entries if e.get("entry_id")],
             "confidence": confidence,
             "original_length": len(content),
@@ -62,11 +78,13 @@ Be terse and preserve exact technical values, names, and file paths."""
         endpoint: str = "http://127.0.0.1:11434/api/chat",
         timeout: float = 90.0,
         fallback: Summarizer | None = None,
+        num_gpu: int = 0,
     ):
         self.model = model
         self.endpoint = endpoint
         self.timeout = timeout
         self.fallback = fallback or HeuristicSummarizer()
+        self.num_gpu = num_gpu
 
     def summarize_entries(self, entries: list[dict[str, Any]], context: dict[str, Any] | None = None) -> dict[str, Any]:
         if not entries:
@@ -82,7 +100,7 @@ Be terse and preserve exact technical values, names, and file paths."""
             ],
             "stream": False,
             "format": "json",
-            "options": {"num_gpu": 0, "num_ctx": 4096},
+            "options": {"num_gpu": self.num_gpu, "num_ctx": 4096},
         }
         try:
             request = Request(self.endpoint, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})

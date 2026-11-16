@@ -1,3 +1,48 @@
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# Build / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+.eggs/
+
+# Test / coverage
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Type checkers
+.mypy_cache/
+.pytype/
+.ruff_cache/
+.pyright/
+
+# Editors
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific: never commit stored memory data
+.local/share/memory_manager/
+/dev/shm/memory_manager/
