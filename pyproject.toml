@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-memory-manager"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local tiered memory manager for extending LLM context windows"
 readme = "README.md"
 license = { text = "MIT" }
@@ -31,6 +31,7 @@ classifiers = [
 
 [project.scripts]
 memory-manager-mcp = "memory_manager.mcp_server:main"
+memory-manager-proxy = "memory_manager.proxy:main"
 
 [project.urls]
 Homepage = "https://github.com/gmic/memory_manager"

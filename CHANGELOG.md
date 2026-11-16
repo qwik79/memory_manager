@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-11-16
+
+Context extension becomes the core, slot-in component; persistence becomes opt-in.
+
+### Added
+- **Ephemeral mode (now the default).** `MemoryDocStore` keeps every tier in process memory: no files, no autosave thread, wiped on `close()`. Selected by default, or with `TieredMemoryManager.ephemeral()`.
+- **Persistent mode is opt-in** via `persist=True`, `base_paths`, or `TieredMemoryManager.persistent(path)`. `promote(path)` moves a live ephemeral session to disk; `wipe()` deletes a session from every tier.
+- `backends.py`: `DocStore` protocol with `FileDocStore` (wraps `atomic_json_write`/`read_json` and the security layer) and `MemoryDocStore`. All tiers and session state go through it.
+- **`ContextVirtualizer`** (messages in, messages out) for hosts that own their history: fingerprint-deduplicated mirroring, regenerate/edit/truncation/tool-call handling, turn-aligned offloads decided by `OffloadTrigger` scoped to the history budget, a prompt layout that keeps the prefix stable for KV caching, and retrieval injected at the latest user turn.
+- **OpenAI-compatible proxy** (`memory-manager-proxy` / `python -m memory_manager.proxy`): streaming and non-streaming, pass-through routes, auto per-conversation sessions, idle reaping, `--persist`, `--secure`, `--embed-model`.
+- `TieredMemoryManager.add_message(role, ..., auto_offload=)` and `offload_entries(...)`; `HotBufferManager.tag_entries/get_entries_by_id/clear`; `WarmSection.raw_content`.
+- MCP server `--ephemeral` flag; `examples/chat_repl.py`.
+
+### Changed
+- **Breaking:** a manager constructed without `base_paths` is ephemeral. Pass `persist=True` for the 0.1.0 behaviour. The MCP server and the single-shot chat examples opt in explicitly.
+- Warm sections store full `raw_content`; cold indexing uses it (and recorded chunking), so the cold tier rebuilds from warm at full fidelity.
+- Cold chunking splits on message/paragraph boundaries and keeps blocks verbatim (shared with the Chroma adapter).
+- Lexical cold scoring uses sublinear TF (1 + ln tf), and query stopwords are dropped.
+
+### Fixed
+- Chunker emitted a redundant trailing chunk duplicating the end of the previous one (450 words at size 500 gave `[450, 50]`).
+- Tokenizer indexed punctuation-only tokens as empty strings.
+- `import_session` left the pinned context rendering the pre-import session.
+- `wipe()` followed by `close()` no longer writes `session.json` back.
+
 ## [0.1.0] — 2026-08-24
 
 Initial release.

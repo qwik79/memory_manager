@@ -15,6 +15,9 @@ Memory Manager acts as an external memory tier for LLM conversations — like ho
 ## Features
 
 - 🧠 **Three-tier memory** — Hot (recent raw) → Warm (summarized) → Cold (indexed search) with automatic cascading
+- 🪟 **Context virtualization** — messages in, messages out: trims history to fit the window, distills what's offloaded, retrieves it back when relevant
+- 🔀 **Drop-in OpenAI-compatible proxy** — point any client at it; works in front of Ollama, LM Studio, llama.cpp, vLLM
+- 👻 **Ephemeral by default** — RAM-only sessions that leave no trace; persistence (and the cold-storage database) is opt-in
 - 📊 **5-signal relevance scoring** — Importance, recency, references, content richness, and tag bonuses
 - 🔍 **Hybrid retrieval** — BM25-inspired warm store + semantic embedding cold store (lexical fallback always available)
 - ⚡ **Background distillation** — Heuristic, LLM, Cascade, and Speculative patterns
@@ -62,10 +65,19 @@ pip install -e ".[all]"
 
 ## Quick Start
 
+The fastest way in needs no code: run the proxy and point your chat client at it.
+
+```bash
+python -m memory_manager.proxy --upstream http://localhost:11434/v1 --context-tokens 8192
+# client base URL: http://127.0.0.1:8787/v1
+```
+
+Or use the library directly:
+
 ```python
 from memory_manager import TieredMemoryManager
 
-with TieredMemoryManager(
+with TieredMemoryManager(          # ephemeral by default; persist=True to keep it
     session_id="my-project",
     project_name="My App",
 ) as manager:
@@ -79,6 +91,95 @@ with TieredMemoryManager(
     # Compact when the hot buffer grows large.
     manager.compact_hot_to_warm()  # auto-cascades to cold index
 ```
+
+---
+
+## Modes: Ephemeral vs Persistent
+
+Both modes run identical tier logic (scoring, distillation, offload, retrieval). Only the document store differs.
+
+| Mode | How to select | Where memory lives | At session end |
+| --- | --- | --- | --- |
+| **Ephemeral** (default) | `TieredMemoryManager(...)`, `TieredMemoryManager.ephemeral(...)` | Process memory only. No files, no autosave thread. | `close()` wipes it; process exit (crash or SIGKILL included) loses it. **Leaves no trace.** |
+| **Persistent** (opt-in) | `persist=True`, `base_paths={...}`, or `TieredMemoryManager.persistent(path)` | JSON files (hot buffer on tmpfs by default), optional HMAC/Fernet | Flushed to disk; reopen the same `session_id` to resume |
+
+```python
+mm = TieredMemoryManager.ephemeral("chat-42")
+mm = TieredMemoryManager.persistent("~/.local/share/mm", session_id="proj", secure=True)
+mm = TieredMemoryManager.persistent(session_id="proj")      # standard locations / env vars
+
+mm = TieredMemoryManager.ephemeral("draft")
+mm.promote("~/.local/share/mm")    # "actually, keep this one": copy to disk, start autosave
+mm.wipe()                          # delete this session from every tier, any mode
+```
+
+> **Changed in 0.2.0:** constructing a manager without `base_paths` used to write to `~/.local/share/memory_manager`. It is now ephemeral. Pass `persist=True` (or use `persistent()`) to keep the old behaviour. The MCP server stays persistent by default.
+
+`secure`/`encrypt` apply only to persistent mode; in-memory documents never leave the process. A custom backend implements the small `DocStore` protocol in `backends.py`.
+
+---
+
+## Context Virtualization
+
+`ContextVirtualizer` is the component for apps that **own their own chat history**, which is most of them. Each turn, hand it the full OpenAI-style message list; it returns a list that fits the window.
+
+```python
+from memory_manager import ContextVirtualizer, TieredMemoryManager, VirtualizerConfig
+
+mm = TieredMemoryManager.ephemeral("chat-42")
+vz = ContextVirtualizer(mm, VirtualizerConfig(max_context_tokens=8192))
+
+prompt = vz.rewrite(history)   # your full history, not modified
+reply = call_backend(prompt)
+vz.observe(reply)              # optional; also picked up from the next history
+print(vz.last_stats)           # tokens in/out, offloads and why, retrieved excerpts
+```
+
+**How it works**
+
+- **Mirrors the host's history** into the hot buffer, deduplicated by message fingerprint, so resending history never double-counts. Assistant turns still feed the distiller.
+- **Real client behaviour is handled**: regenerate and edit supersede the stale tail; clients that truncate history themselves have the dropped turns offloaded instead of lost; tool calls are never separated from their results (offloads cut only at turn boundaries); in persistent mode a restart resumes without re-ingesting.
+- **Offload decisions come from the composite `OffloadTrigger`** (token pressure, semantic drift, structural seams), scoped to the history budget. Under token pressure it evicts whole turns down to `offload_target` (50%), so offloads happen in chunks. On a drift or seam with no pressure it offloads the finished topic, if it's big enough (`min_topic_offload`) to be worth a prefix change.
+- **Offloaded turns become a warm section** (distilled summary plus full `raw_content`) and are indexed into cold in message-aligned chunks.
+
+**Prompt layout is built for prefix (KV) caching.** Backends reuse prefill for an unchanged prompt prefix, so anything that changes per turn goes last:
+
+```
+[system]  host system prompt                          <- never changes
+          memory preamble + pinned state      ┐
+          distilled earlier turns             ┘       <- re-rendered only when an offload fires
+...       retained conversation turns                 <- append-only between offloads
+[user]    <retrieved_memory> + latest user message    <- the only per-turn change
+```
+
+The memory block is frozen between offloads even though the distiller updates the pinned summary every turn. Retrieved excerpts are prepended to the latest user message, because some chat templates reject mid-conversation system messages (`retrieval_placement="system_message"` if yours allows it). Excerpts already shown in the system block are skipped.
+
+### Proxy
+
+`memory_manager.proxy` wraps the virtualizer in an OpenAI-compatible server (standard library only). Chat requests are virtualized, streaming and non-streaming, tool calls included. Every other route (`/v1/models`, embeddings, …) is passed through. It does no inference itself, so the backend stays interchangeable.
+
+```bash
+memory-manager-proxy --upstream http://localhost:1234/v1 --context-tokens 16384
+memory-manager-proxy --upstream http://localhost:11434/v1 --embed-model nomic-embed-text   # semantic retrieval
+memory-manager-proxy --persist ~/.local/share/mm-proxy --secure                             # opt-in persistence
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--upstream` | `http://localhost:11434/v1` | Backend base URL |
+| `--context-tokens` / `--reserve-tokens` | 8192 / 1024 | The backend's real window (e.g. Ollama `num_ctx`; the proxy can't read it) and room for the reply |
+| `--session` | `auto` | `auto` = one session per conversation; any other value pins every request to that session |
+| `--session-header` | `X-Memory-Session` | Header(s) carrying an explicit session ID; repeatable |
+| `--persist DIR` / `--secure` | off | Opt in to persistent memory / HMAC-sign it |
+| `--embed-model` / `--embed-url` | off | Ollama embeddings for hybrid semantic + lexical cold retrieval |
+| `--idle-timeout` | 3600 | Close sessions idle this many seconds (ephemeral ones are wiped) |
+
+Management: `GET /memory/sessions` lists live sessions; `DELETE /memory/sessions/<id>` ends one (`?wipe=1` also deletes persistent data).
+
+**Known limitations**
+- Token counts are estimates; leave headroom in `--reserve-tokens`.
+- Auto sessions key on the system prompt plus first message, so two simultaneous chats that open identically ("hi") share a session. Use `--session-header` if your client can send a per-conversation ID.
+- Edits to already-offloaded messages don't retract their distilled memory.
 
 ---
 
@@ -180,9 +281,9 @@ Add to your MCP config:
 
 | Tier | Purpose | Backing | Latency | Retrieval |
 |------|---------|---------|---------|-----------|
-| **Hot** | Raw recent entries | JSON on tmpfs / disk | <1 ms | Scored index, O(k) top-k |
-| **Warm** | Summarized sections | JSON on disk | <5 ms | BM25 + recency + metadata |
-| **Cold** | Long-term search | JSON lexical or ChromaDB | <50 ms | Hybrid semantic + lexical |
+| **Hot** | Raw recent entries | RAM (ephemeral) · JSON on tmpfs / disk | <1 ms | Scored index, O(k) top-k |
+| **Warm** | Summarized sections + raw source text | RAM · JSON on disk | <5 ms | BM25 + recency + metadata |
+| **Cold** | Long-term search, rebuildable from warm | RAM · JSON lexical or ChromaDB | <50 ms | Hybrid semantic + lexical (sublinear TF) |
 
 ### Relevance scoring
 
@@ -407,6 +508,8 @@ ensure_model("qwen2.5:3b", on_progress=lambda msg: print(msg))
 
 ## Environment Variables
 
+These apply to persistent mode; ephemeral sessions never touch disk.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMORY_MANAGER_HOME` | `~/.local/share/memory_manager` | Base storage directory for all tiers |
@@ -417,14 +520,18 @@ ensure_model("qwen2.5:3b", on_progress=lambda msg: print(msg))
 ## CLI Reference
 
 ```bash
-# Start MCP server
-memory-manager-mcp --session my-project [--project "My App"] [--secure] [--transport stdio|sse]
+# Start the context-extension proxy (ephemeral by default)
+memory-manager-proxy --upstream http://localhost:11434/v1 --context-tokens 8192 [--persist DIR] [--embed-model nomic-embed-text]
+
+# Start MCP server (persistent by default)
+memory-manager-mcp --session my-project [--project "My App"] [--secure] [--ephemeral] [--transport stdio|sse]
 
 # Or as a Python module
 python -m memory_manager.mcp_server --session my-project
 
 # Run examples
 python examples/basic_flow.py
+python examples/chat_repl.py --base-url http://localhost:11434/v1 --model qwen2.5:7b --context-tokens 2048
 python examples/ollama_chat.py "What's the status?" --model qwen2.5:7b
 python examples/lmstudio_chat.py "Summarize decisions." --model local-model
 python examples/openai_compat_chat.py "Next steps?" --host http://localhost:8080/v1
@@ -439,6 +546,7 @@ memory_manager/
 ├── __init__.py            # Public API exports
 ├── __main__.py            # python -m memory_manager.mcp_server entry
 ├── active_context.py      # Token-budgeted context assembly
+├── backends.py            # DocStore protocol: FileDocStore (persistent) + MemoryDocStore (ephemeral)
 ├── background_worker.py   # Distiller protocol + worker thread
 ├── cold_store.py          # Tier 3: hybrid semantic + lexical search
 ├── cold_store_chroma.py   # Tier 3: ChromaDB vector adapter
@@ -450,12 +558,14 @@ memory_manager/
 ├── models.py              # Data classes (MemoryEntry, MemorySession, etc.)
 ├── ollama_integration.py  # LLMIntegration adapter
 ├── openai_summarizer.py   # OpenAI-compatible summarizer
-├── orchestrator.py        # TieredMemoryManager (central coordinator)
+├── orchestrator.py        # TieredMemoryManager (central coordinator, modes)
+├── proxy.py               # OpenAI-compatible context-extension proxy
 ├── scoring.py             # 5-signal relevance scoring + EntryIndex
 ├── security.py            # HMAC-SHA256 + Fernet encryption
 ├── storage.py             # Atomic JSON I/O + token estimation
 ├── summarizer.py          # HeuristicSummarizer + OllamaSummarizer
 ├── trigger.py             # Offload trigger conditions
+├── virtualizer.py         # ContextVirtualizer: messages in, messages out
 └── warm_store.py          # Tier 2: BM25-scored summarized sections
 ```
 
@@ -465,8 +575,8 @@ memory_manager/
 
 | Tool | What it does | How memory_manager differs |
 |------|-------------|---------------------------|
-| **mem0** | Cloud-hosted memory for LLM apps | Local-first, zero-dependency, file-backed |
-| **Zep** | Server-side conversation memory | Library, not a server — embed in your code |
+| **mem0** | Cloud-hosted memory for LLM apps | Local-first, zero-dependency, RAM or file-backed |
+| **Zep** | Server-side conversation memory | Library first; optional stateless-by-default proxy, no inference of its own |
 | **LangChain Memory** | In-process memory for chains | Single-tier, no scoring, no persistence |
 | **LlamaIndex** | Document indexing + RAG | Different scope — this manages *conversation* memory |
 | **Letta (MemGPT)** | Agent with self-managing memory | Closest cousin, but Letta is a full framework |

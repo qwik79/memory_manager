@@ -58,6 +58,7 @@ def create_server(
     session_id: str = "default",
     project_name: str = "",
     secure: bool = False,
+    ephemeral: bool = False,
 ) -> MCPServer:
     """Create an MCPServer with memory_manager tools registered.
 
@@ -69,6 +70,10 @@ def create_server(
         Human-readable project label.
     secure:
         Enable HMAC-SHA256 tamper protection on stored files.
+    ephemeral:
+        Keep memory in RAM only for the server's lifetime (nothing on disk).
+        By default the server is persistent, since tool memory usually spans
+        editor sessions.
     """
     mcp = MCPServer("memory-manager")
 
@@ -77,6 +82,7 @@ def create_server(
         session_id=session_id,
         project_name=project_name,
         secure=secure,
+        persist=not ephemeral,
     )
 
     # ------------------------------------------------------------------
@@ -305,6 +311,11 @@ def main() -> None:
         help="Enable HMAC-SHA256 tamper protection on stored files.",
     )
     parser.add_argument(
+        "--ephemeral",
+        action="store_true",
+        help="Keep memory in RAM only; nothing is written to disk and it is gone when the server exits.",
+    )
+    parser.add_argument(
         "--transport", "-t",
         choices=["stdio", "sse", "streamable-http"],
         default="stdio",
@@ -323,6 +334,7 @@ def main() -> None:
         session_id=args.session,
         project_name=args.project,
         secure=args.secure,
+        ephemeral=args.ephemeral,
     )
 
     logger.info(

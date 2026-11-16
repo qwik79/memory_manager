@@ -20,8 +20,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from .backends import MEMORY_ROOT, DocStore, FileDocStore
 from .models import RetrievalResult, new_id
-from .storage import atomic_json_write, default_base_path, read_json, safe_id
+from .storage import default_base_path, safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +32,80 @@ EmbedFn = Callable[[str], Sequence[float]]
 # Cosine helper — works for both sparse (Counter) and dense (list) vectors.
 # ---------------------------------------------------------------------------
 
+_STOPWORDS = frozenset(
+    """a about above after again all am an and any are as at be been before being below between both but by
+    can could did do does doing down during each few for from further had has have having he her here hers him
+    his how i if in into is it its itself just me more most my no nor not now of off on once only or other our
+    ours out over own same say said she should so some such than that the their theirs them then there these
+    they this those through to too under until up very was we were what when where which while who whom why
+    will with would you your yours""".split()
+)
+
+
+def tokenize(text: str) -> list[str]:
+    """Lowercase tokens with surrounding punctuation stripped; empty tokens dropped."""
+    tokens = (token.strip(".,!?;:()[]{}\"'`).").lower() for token in text.split())
+    return [token for token in tokens if token]
+
+
+def query_terms(text: str) -> Counter[str]:
+    """Query vector: tokens minus common function words (falls back to all tokens)."""
+    tokens = tokenize(text)
+    return Counter(t for t in tokens if t not in _STOPWORDS) or Counter(tokens)
+
+
+def split_chunks(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """Chunk on blank-line boundaries (messages, paragraphs), packing blocks up to
+    *chunk_size* words. Blocks larger than that are split by words with *overlap*.
+
+    Blocks that fit are kept verbatim, so code and line structure survive, and no
+    trailing chunk is emitted that merely repeats the end of the previous one.
+    """
+    chunk_size = max(1, chunk_size)
+    overlap = min(max(0, overlap), chunk_size - 1)
+    chunks: list[str] = []
+    pending: list[str] = []
+    pending_words = 0
+
+    def flush() -> None:
+        nonlocal pending, pending_words
+        if pending:
+            chunks.append("\n\n".join(pending))
+        pending, pending_words = [], 0
+
+    for block in (b.strip() for b in text.split("\n\n")):
+        words = block.split()
+        if not words:
+            continue
+        if len(words) > chunk_size:
+            flush()
+            step = chunk_size - overlap
+            for i in range(0, len(words), step):
+                chunks.append(" ".join(words[i : i + chunk_size]))
+                if i + chunk_size >= len(words):
+                    break
+            continue
+        if pending_words + len(words) > chunk_size:
+            flush()
+        pending.append(block)
+        pending_words += len(words)
+    flush()
+    return chunks
+
+
 def _cosine_sparse(left: Counter[str], right: Counter[str]) -> float:
-    """Cosine similarity over sparse term-frequency vectors."""
+    """Cosine similarity over sublinear term weights (1 + ln tf).
+
+    Sublinear weighting stops repeated filler words from drowning out a rare
+    matching term in long chunks.
+    """
     if not left or not right:
         return 0.0
-    dot = sum(left[t] * right.get(t, 0) for t in left)
-    left_norm = math.sqrt(sum(v * v for v in left.values()))
-    right_norm = math.sqrt(sum(v * v for v in right.values()))
+    lw = {t: 1.0 + math.log(c) for t, c in left.items() if c > 0}
+    rw = {t: 1.0 + math.log(c) for t, c in right.items() if c > 0}
+    dot = sum(w * rw.get(t, 0.0) for t, w in lw.items())
+    left_norm = math.sqrt(sum(w * w for w in lw.values()))
+    right_norm = math.sqrt(sum(w * w for w in rw.values()))
     return dot / (left_norm * right_norm) if left_norm and right_norm else 0.0
 
 
@@ -68,15 +136,24 @@ class ColdStoreManager:
         base_path: str | Path | None = None,
         security: Any = None,
         embed_fn: EmbedFn | None = None,
+        store: DocStore | None = None,
     ):
-        self.base_path = Path(base_path) if base_path else default_base_path("llm_cold")
-        self.base_path.mkdir(parents=True, exist_ok=True)
+        self.store: DocStore = store if store is not None else FileDocStore(security)
+        if base_path:
+            self.base_path = Path(base_path)
+        else:
+            self.base_path = default_base_path("llm_cold") if self.store.persistent else MEMORY_ROOT / "cold"
+        self.store.ensure_dir(self.base_path)
         self._security = security
         self._embed_fn = embed_fn
 
+    @property
+    def persistent(self) -> bool:
+        return bool(self.store.persistent)
+
     def _index_dir(self, session_id: str) -> Path:
         path = self.base_path / "sessions" / safe_id(session_id) / "chunks"
-        path.mkdir(parents=True, exist_ok=True)
+        self.store.ensure_dir(path)
         return path
 
     def index_section(
@@ -114,22 +191,26 @@ class ColdStoreManager:
                     data["embedding"] = list(self._embed_fn(chunk))
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Embedding failed for chunk %s: %s", chunk_id, exc)
-            atomic_json_write(
-                self._index_dir(session_id) / f"{chunk_id}.json",
-                data,
-                security=self._security,
-            )
+            self.store.write(self._index_dir(session_id) / f"{chunk_id}.json", data)
             chunk_ids.append(chunk_id)
         return chunk_ids
 
     def index_warm_section(self, section: dict[str, Any], tags: list[str] | None = None) -> list[str]:
-        """Index a warm section record into cold storage."""
+        """Index a warm section record into cold storage.
+
+        Indexes the section's full ``raw_content`` when present, so retrieval is
+        not limited to what survived summarization. Chunking parameters recorded
+        in ``metadata["chunking"]`` are honoured so rebuilds reproduce them.
+        """
         metadata = dict(section.get("metadata", {}))
         metadata["source_entry_ids"] = section.get("source_entry_ids", [])
+        chunking = metadata.get("chunking") or {}
         return self.index_section(
+            chunk_size=int(chunking.get("size", 500)),
+            chunk_overlap=int(chunking.get("overlap", 100)),
             session_id=section.get("session_id", "default"),
             section_name=section.get("section_name", "warm_section"),
-            content=section.get("content", ""),
+            content=section.get("raw_content") or section.get("content", ""),
             tags=tags or metadata.get("tags", []),
             metadata=metadata,
             source_section_id=section.get("section_id"),
@@ -140,16 +221,33 @@ class ColdStoreManager:
         if not source_section_id:
             return 0
         deleted = 0
-        for path in self._index_dir(session_id).glob("*.json"):
+        for path in self.store.list(self._index_dir(session_id)):
             try:
-                data = read_json(path, security=self._security)
+                data = self.store.read(path) or {}
             except Exception:
                 logger.warning("Skipping unreadable/tampered chunk %s during delete.", path.name)
                 continue
             if data.get("source_section_id") == source_section_id:
-                path.unlink()
-                deleted += 1
+                deleted += int(self.store.delete(path))
         return deleted
+
+    def list_chunks(self, session_id: str) -> list[dict[str, Any]]:
+        """All readable chunk records for a session."""
+        chunks = []
+        for path in self.store.list(self._index_dir(session_id)):
+            try:
+                chunks.append(self.store.read(path) or {})
+            except Exception:
+                logger.warning("Skipping unreadable/tampered chunk %s.", path.name)
+        return chunks
+
+    def put_chunk(self, session_id: str, chunk: dict[str, Any]) -> None:
+        """Write an existing chunk record as-is (used when promoting a session)."""
+        self.store.write(self._index_dir(session_id) / f"{safe_id(chunk['chunk_id'])}.json", chunk)
+
+    def clear(self, session_id: str) -> int:
+        """Delete every chunk for a session."""
+        return sum(int(self.store.delete(p)) for p in self.store.list(self._index_dir(session_id)))
 
     def retrieve(
         self,
@@ -168,8 +266,8 @@ class ColdStoreManager:
         Chunks that fail signature verification are silently skipped rather than
         crashing retrieval — a tampered chunk should not surface to the LLM.
         """
-        query_terms = Counter(self._tokens(query))
-        if not query_terms and self._embed_fn is None:
+        terms = query_terms(query)
+        if not terms and self._embed_fn is None:
             return []
 
         # Compute query embedding once for the entire retrieval pass.
@@ -181,9 +279,9 @@ class ColdStoreManager:
                 logger.warning("Query embedding failed, falling back to lexical: %s", exc)
 
         results: list[RetrievalResult] = []
-        for path in self._index_dir(session_id).glob("*.json"):
+        for path in self.store.list(self._index_dir(session_id)):
             try:
-                data = read_json(path, security=self._security)
+                data = self.store.read(path) or {}
             except Exception:
                 logger.warning(
                     "Cold chunk %s failed verification — skipping to prevent prompt injection.",
@@ -194,7 +292,7 @@ class ColdStoreManager:
             if tags_filter and tags_filter != ["all"] and not any(tag in tags for tag in tags_filter):
                 continue
 
-            score = self._score_chunk(query_terms, query_embedding, data)
+            score = self._score_chunk(terms, query_embedding, data)
             if score >= min_relevance:
                 results.append(
                     RetrievalResult(
@@ -243,13 +341,7 @@ class ColdStoreManager:
     # ------------------------------------------------------------------
 
     def _split_words(self, text: str, chunk_size: int, overlap: int) -> list[str]:
-        words = text.split()
-        if not words:
-            return []
-        chunk_size = max(1, chunk_size)
-        overlap = min(max(0, overlap), chunk_size - 1)
-        step = chunk_size - overlap
-        return [" ".join(words[i : i + chunk_size]) for i in range(0, len(words), step)]
+        return split_chunks(text, chunk_size, overlap)
 
     def _tokens(self, text: str) -> list[str]:
-        return [token.strip(".,!?;:()[]{}\"'`).").lower() for token in text.split() if token.strip()]
+        return tokenize(text)

@@ -129,6 +129,8 @@ class WarmSection:
     )
     created_at: float = field(default_factory=time.time)
     indexed_at: float | None = None
+    raw_content: str = ""
+    """Full source text behind ``content`` (which may be a lossy distillation)."""
     schema_version: int = 1
 
     def to_json(self) -> dict[str, Any]:

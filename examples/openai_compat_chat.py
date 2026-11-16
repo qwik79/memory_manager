@@ -65,8 +65,10 @@ def main() -> None:
             endpoint=f"{args.host.rstrip('/')}/chat/completions",
         )
 
+    # Each run is a new process, so memory must persist on disk between runs.
     with TieredMemoryManager(
         session_id=args.session,
+        persist=True,
         project_name="OpenAI-compat memory demo",
         pinned_summary="Use local tiered memory to augment an OpenAI-compatible chat request.",
         distiller=distiller,

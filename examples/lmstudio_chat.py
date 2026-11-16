@@ -36,8 +36,10 @@ def main() -> None:
     parser.add_argument("--session", default="lmstudio-demo", help="Memory session ID")
     args = parser.parse_args()
 
+    # Each run is a new process, so memory must persist on disk between runs.
     with TieredMemoryManager(
         session_id=args.session,
+        persist=True,
         project_name="LM Studio memory demo",
         pinned_summary="Use local tiered memory to augment an OpenAI-compatible chat request.",
     ) as manager:

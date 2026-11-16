@@ -37,8 +37,10 @@ def main() -> None:
     parser.add_argument("--session", default="ollama-demo", help="Memory session ID")
     args = parser.parse_args()
 
+    # Each run is a new process, so memory must persist on disk between runs.
     with TieredMemoryManager(
         session_id=args.session,
+        persist=True,
         project_name="Ollama memory demo",
         pinned_summary="Use local tiered memory to augment an Ollama chat request.",
     ) as manager:

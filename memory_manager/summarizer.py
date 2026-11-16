@@ -13,6 +13,21 @@ class Summarizer(Protocol):
         """Summarize raw entries into structured memory."""
 
 
+def render_entries(entries: list[dict[str, Any]]) -> str:
+    """Render hot entries as a speaker-labelled transcript, one block per entry.
+
+    Used as warm ``raw_content``; the blank-line separators let the cold store
+    chunk on message boundaries.
+    """
+    blocks = []
+    for entry in entries:
+        content = str(entry.get("content", "")).strip()
+        role = entry.get("entry_type")
+        if content:
+            blocks.append(f"{role}: {content}" if role else content)
+    return "\n\n".join(blocks)
+
+
 class HeuristicSummarizer:
     """Deterministic fallback summarizer used when no secondary LLM is configured."""
 

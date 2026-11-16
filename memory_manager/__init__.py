@@ -1,6 +1,7 @@
 """Tiered memory manager for extending LLM context with local memory tiers."""
 
 from .active_context import ActiveContext, ContextItem
+from .backends import DocStore, FileDocStore, MemoryDocStore
 from .background_worker import (
     BackgroundWorker,
     CascadeDistiller,
@@ -22,6 +23,7 @@ from .scoring import EntryIndex, auto_classify_importance, compute_relevance_sco
 from .security import SecurityManager, TamperDetectedError, get_security_manager
 from .summarizer import HeuristicSummarizer, OllamaSummarizer
 from .trigger import OffloadTrigger, TriggerConfig
+from .virtualizer import ContextVirtualizer, VirtualizerConfig
 from .warm_store import WarmStoreManager
 
 __all__ = [
@@ -30,13 +32,17 @@ __all__ = [
     "CascadeDistiller",
     "ColdStoreManager",
     "ContextItem",
+    "ContextVirtualizer",
     "Distiller",
+    "DocStore",
     "EntryIndex",
+    "FileDocStore",
     "HeuristicDistiller",
     "HeuristicSummarizer",
     "HotBufferManager",
     "LLMDistiller",
     "LLMIntegration",
+    "MemoryDocStore",
     "MemoryEntry",
     "MemorySession",
     "MemoryTierConfig",
@@ -51,6 +57,7 @@ __all__ = [
     "TamperDetectedError",
     "TieredMemoryManager",
     "TriggerConfig",
+    "VirtualizerConfig",
     "WarmSection",
     "WarmStoreManager",
     "auto_classify_importance",

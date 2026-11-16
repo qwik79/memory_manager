@@ -7,23 +7,33 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .backends import MEMORY_ROOT, DocStore, FileDocStore
 from .models import MemoryEntry
 from .scoring import EntryIndex, auto_classify_importance, compute_relevance_score
-from .storage import atomic_json_write, default_hot_path, estimate_tokens, read_json, safe_id
+from .storage import default_hot_path, estimate_tokens, safe_id
 
 
 class HotBufferManager:
-    """Structured file-backed hot buffer for recent session entries."""
+    """Hot buffer for recent session entries on a pluggable document store.
+
+    With the default (file) store it is a JSON file, preferring tmpfs. Pass a
+    :class:`~memory_manager.backends.MemoryDocStore` to keep it in RAM only.
+    """
 
     def __init__(
         self,
         session_id: str,
         base_path: str | Path | None = None,
         security: Any = None,
+        store: DocStore | None = None,
     ):
         self.session_id = safe_id(session_id)
-        self.base_path = Path(base_path) if base_path else default_hot_path()
-        self.base_path.mkdir(parents=True, exist_ok=True)
+        self.store: DocStore = store if store is not None else FileDocStore(security)
+        if base_path:
+            self.base_path = Path(base_path)
+        else:
+            self.base_path = default_hot_path() if self.store.persistent else MEMORY_ROOT / "hot"
+        self.store.ensure_dir(self.base_path)
         self._lock = threading.RLock()
         self._security = security
         self._index = EntryIndex()
@@ -32,13 +42,17 @@ class HotBufferManager:
         self._rebuild_index()
 
     @property
+    def persistent(self) -> bool:
+        return bool(self.store.persistent)
+
+    @property
     def file_path(self) -> Path:
         return self.base_path / f"{self.session_id}_hot.json"
 
     def _init_file(self) -> None:
-        if self.file_path.exists():
+        if self.store.exists(self.file_path):
             return
-        atomic_json_write(
+        self.store.write(
             self.file_path,
             {
                 "schema_version": 1,
@@ -47,18 +61,17 @@ class HotBufferManager:
                 "entries": [],
                 "metadata": {"created_at": time.time(), "last_cleanup": time.time()},
             },
-            security=self._security,
         )
 
     def _read_state(self) -> dict[str, Any]:
-        return read_json(self.file_path, default={"entries": []}, security=self._security)
+        return self.store.read(self.file_path, default={"entries": []}) or {"entries": []}
 
     def _write_state(self, data: dict[str, Any]) -> None:
         data.setdefault("schema_version", 1)
         data.setdefault("session_id", self.session_id)
         data.setdefault("type", "hot_buffer")
         data.setdefault("metadata", {})["updated_at"] = time.time()
-        atomic_json_write(self.file_path, data, security=self._security)
+        self.store.write(self.file_path, data)
 
     def append_entry(
         self,
@@ -161,6 +174,37 @@ class HotBufferManager:
                     return True
         return False
 
+    def tag_entries(self, entry_ids: list[str], tag: str) -> int:
+        """Attach a tag to several entries in one write."""
+        ids = set(entry_ids)
+        changed = 0
+        with self._lock:
+            data = self._read_state()
+            for entry in data.get("entries", []):
+                if entry.get("entry_id") in ids:
+                    tags = entry.setdefault("tags", [])
+                    if tag not in tags:
+                        tags.append(tag)
+                        self._index.add_tag(entry["entry_id"], tag)
+                        self._index.update_score(entry["entry_id"], compute_relevance_score(entry))
+                    changed += 1
+            if changed:
+                self._write_state(data)
+        return changed
+
+    def get_entries_by_id(self, entry_ids: list[str]) -> list[dict[str, Any]]:
+        """Return entries with the given IDs (compacted or not), in buffer order."""
+        wanted = set(entry_ids)
+        with self._lock:
+            return [e for e in self._read_state().get("entries", []) if e.get("entry_id") in wanted]
+
+    def clear(self) -> None:
+        """Remove every entry and the backing document."""
+        with self._lock:
+            self.store.delete(self.file_path)
+            self._index = EntryIndex()
+            self._init_file()
+
     def get_entries_ranked(
         self,
         limit: int = 20,
@@ -228,8 +272,7 @@ class HotBufferManager:
         return True
 
     def get_size_estimate(self) -> tuple[int, int]:
-        """Return estimated tokens and bytes for the hot file."""
+        """Return estimated tokens and bytes for the hot buffer document."""
         entries = self.get_entries(limit=None, include_compacted=True)
         content = "\n".join(e.get("content", "") for e in entries)
-        size = self.file_path.stat().st_size if self.file_path.exists() else 0
-        return estimate_tokens(content, overhead=1000), size
+        return estimate_tokens(content, overhead=1000), self.store.size(self.file_path)

@@ -10,8 +10,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from .backends import MEMORY_ROOT, DocStore, FileDocStore
 from .models import RetrievalResult, WarmSection, new_id
-from .storage import atomic_json_write, default_base_path, read_json, safe_id
+from .storage import default_base_path, safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +37,20 @@ class WarmStoreManager:
         self,
         base_path: str | Path | None = None,
         security: Any = None,
+        store: DocStore | None = None,
     ):
-        self.base_path = Path(base_path) if base_path else default_base_path("llm_warm")
-        self.base_path.mkdir(parents=True, exist_ok=True)
+        self.store: DocStore = store if store is not None else FileDocStore(security)
+        if base_path:
+            self.base_path = Path(base_path)
+        else:
+            self.base_path = default_base_path("llm_warm") if self.store.persistent else MEMORY_ROOT / "warm"
+        self.store.ensure_dir(self.base_path)
         self._lock = threading.RLock()
         self._security = security
+
+    @property
+    def persistent(self) -> bool:
+        return bool(self.store.persistent)
 
     # ------------------------------------------------------------------
     # Path helpers
@@ -56,7 +66,7 @@ class WarmStoreManager:
 
     def _section_dir(self, session_id: str) -> Path:
         path = self.session_dir(session_id) / "sections"
-        path.mkdir(parents=True, exist_ok=True)
+        self.store.ensure_dir(path)
         return path
 
     # ------------------------------------------------------------------
@@ -70,8 +80,13 @@ class WarmStoreManager:
         content: str,
         metadata: dict[str, Any] | None = None,
         source_entry_ids: list[str] | None = None,
+        raw_content: str = "",
     ) -> str:
-        """Store a compacted section and return its section ID."""
+        """Store a compacted section and return its section ID.
+
+        *content* is the distilled text shown in prompts; *raw_content* keeps the
+        full source text so the cold index can be rebuilt without loss.
+        """
         section = WarmSection(
             section_id=new_id("warm"),
             session_id=safe_id(session_id),
@@ -79,26 +94,38 @@ class WarmStoreManager:
             content=content,
             metadata=metadata or {},
             source_entry_ids=source_entry_ids or [],
+            raw_content=raw_content,
         )
         path = self._section_dir(session_id) / f"{section.section_id}.json"
         with self._lock:
-            atomic_json_write(path, section.to_json(), security=self._security)
+            self.store.write(path, section.to_json())
         return section.section_id
+
+    def put_section(self, session_id: str, section: dict[str, Any]) -> None:
+        """Write an existing section record as-is (used when promoting a session)."""
+        with self._lock:
+            self.store.write(self._section_dir(session_id) / f"{safe_id(section['section_id'])}.json", section)
+
+    def clear(self, session_id: str) -> int:
+        """Delete every document (sections and session state) for a session."""
+        deleted = 0
+        with self._lock:
+            for path in self.store.walk(self.session_dir(session_id)):
+                deleted += int(self.store.delete(path))
+        return deleted
 
     def get_section(self, session_id: str, section_id: str) -> dict[str, Any] | None:
         """Load one warm section."""
         path = self._section_dir(session_id) / f"{safe_id(section_id)}.json"
-        if not path.exists():
-            return None
-        return read_json(path, security=self._security)
+        return self.store.read(path)
 
     def list_sections(self, session_id: str, include_indexed: bool = True) -> list[dict[str, Any]]:
         """List warm sections for a session."""
         section_dir = self._section_dir(session_id)
         sections = []
-        for path in sorted(section_dir.glob("*.json")):
+        for path in self.store.list(section_dir):
             try:
-                sections.append(read_json(path, security=self._security))
+                sections.append(self.store.read(path) or {})
             except Exception:
                 logger.warning(
                     "Skipping warm section %s — failed verification or read.", path.name
@@ -110,12 +137,12 @@ class WarmStoreManager:
     def mark_indexed(self, session_id: str, section_id: str) -> bool:
         """Mark a warm section as indexed by cold storage."""
         path = self._section_dir(session_id) / f"{safe_id(section_id)}.json"
-        if not path.exists():
-            return False
         with self._lock:
-            data = read_json(path, security=self._security)
+            data = self.store.read(path)
+            if data is None:
+                return False
             data["indexed_at"] = time.time()
-            atomic_json_write(path, data, security=self._security)
+            self.store.write(path, data)
         return True
 
     def gc(
@@ -131,15 +158,15 @@ class WarmStoreManager:
         """
         cutoff = time.time() - max_age_days * 86_400
         deleted = 0
-        for path in self._section_dir(session_id).glob("*.json"):
+        for path in self.store.list(self._section_dir(session_id)):
             try:
-                data = read_json(path, security=self._security)
+                data = self.store.read(path) or {}
             except Exception:
                 continue
             indexed_at = data.get("indexed_at")
             created_at = data.get("created_at", time.time())
             if indexed_at and created_at < cutoff:
-                path.unlink(missing_ok=True)
+                self.store.delete(path)
                 deleted += 1
                 logger.debug(
                     "GC: purged warm section %s (age=%.1f days).",

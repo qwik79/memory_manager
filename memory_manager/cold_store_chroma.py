@@ -82,13 +82,9 @@ class ChromaColdStore:
         return self._collections[sid]
 
     def _split_words(self, text: str, chunk_size: int, overlap: int) -> list[str]:
-        words = text.split()
-        if not words:
-            return []
-        chunk_size = max(1, chunk_size)
-        overlap = min(max(0, overlap), chunk_size - 1)
-        step = chunk_size - overlap
-        return [" ".join(words[i : i + chunk_size]) for i in range(0, len(words), step)]
+        from .cold_store import split_chunks  # noqa: PLC0415 — shared chunker
+
+        return split_chunks(text, chunk_size, overlap)
 
     @staticmethod
     def _sanitize_metadata(meta: dict[str, Any]) -> dict[str, Any]:
@@ -164,10 +160,13 @@ class ChromaColdStore:
         """Index a warm section dict into cold storage."""
         metadata = dict(section.get("metadata", {}))
         metadata["source_entry_ids"] = str(section.get("source_entry_ids", []))
+        chunking = metadata.pop("chunking", None) or {}
         return self.index_section(
+            chunk_size=int(chunking.get("size", 500)),
+            chunk_overlap=int(chunking.get("overlap", 100)),
             session_id=section.get("session_id", "default"),
             section_name=section.get("section_name", "warm_section"),
-            content=section.get("content", ""),
+            content=section.get("raw_content") or section.get("content", ""),
             tags=tags or [],
             metadata=metadata,
             source_section_id=section.get("section_id"),
