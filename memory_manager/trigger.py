@@ -17,7 +17,7 @@ EmbedFn = Callable[[str], Embedding]
 class TriggerConfig:
     """Tunable offload thresholds; token pressure always has a hard override."""
 
-    context_size: int = 32_000
+    context_size: int = 8_192  # tokens — must match your Core model's actual ctx window
     token_soft_pct: float = 0.65
     token_hard_pct: float = 0.90
     drift_threshold: float = 0.32
@@ -50,7 +50,10 @@ class OffloadTrigger:
         embed_fn: EmbedFn | None = None,
     ) -> dict[str, object]:
         text = "\n".join(str(message.get("content", "")) for message in messages)
-        token_pct = estimate_tokens(text) / self.config.context_size
+        # Word-based estimate (words × 1.33) is more accurate for LLM tokenizers
+        # on code-heavy content than char ÷ 4.
+        estimated_tokens = int(len(text.split()) * 1.33)
+        token_pct = estimated_tokens / self.config.context_size
         if token_pct >= self.config.token_hard_pct:
             return {"should_offload": True, "score": 1.0, "token_pct": token_pct, "reasons": ["hard token limit"]}
 

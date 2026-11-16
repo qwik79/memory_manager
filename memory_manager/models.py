@@ -55,6 +55,20 @@ class MemorySession:
         data["last_updated"] = utc_now_iso()
         return data
 
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "MemorySession":
+        """Reconstruct a :class:`MemorySession` from a persisted JSON dict."""
+        return cls(
+            session_id=data["session_id"],
+            project_name=data.get("project_name", ""),
+            pinned_summary=data.get("pinned_summary", ""),
+            current_task=data.get("current_task"),
+            active_decisions=data.get("active_decisions", []),
+            open_questions=data.get("open_questions", []),
+            completed_subtasks=data.get("completed_subtasks", []),
+            memory_notes=data.get("memory_notes", ""),
+        )
+
 
 @dataclass
 class MemoryEntry:
@@ -68,6 +82,8 @@ class MemoryEntry:
     context_ref: str | None = None
     tags: list[str] = field(default_factory=list)
     relevance_hint: float = 1.0
+    importance: str = "medium"   # low | medium | high | critical
+    phase: str = ""              # e.g. "planning", "implementation", "debugging"
     compacted_at: float | None = None
 
     def to_json(self) -> dict[str, Any]:
@@ -82,6 +98,8 @@ class MemoryEntry:
         context_ref: str | None = None,
         tags: list[str] | None = None,
         relevance_hint: float = 1.0,
+        importance: str = "medium",
+        phase: str = "",
     ) -> "MemoryEntry":
         return cls(
             entry_id=new_id("entry"),
@@ -91,6 +109,8 @@ class MemoryEntry:
             context_ref=context_ref,
             tags=tags or [],
             relevance_hint=relevance_hint,
+            importance=importance,
+            phase=phase,
         )
 
 
@@ -109,6 +129,8 @@ class WarmSection:
     )
     created_at: float = field(default_factory=time.time)
     indexed_at: float | None = None
+    raw_content: str = ""
+    """Full source text behind ``content`` (which may be a lossy distillation)."""
     schema_version: int = 1
 
     def to_json(self) -> dict[str, Any]:

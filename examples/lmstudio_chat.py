@@ -36,26 +36,28 @@ def main() -> None:
     parser.add_argument("--session", default="lmstudio-demo", help="Memory session ID")
     args = parser.parse_args()
 
-    manager = TieredMemoryManager(
+    # Each run is a new process, so memory must persist on disk between runs.
+    with TieredMemoryManager(
         session_id=args.session,
+        persist=True,
         project_name="LM Studio memory demo",
         pinned_summary="Use local tiered memory to augment an OpenAI-compatible chat request.",
-    )
-    manager.add_user_message(args.message)
-    system_prompt = manager.build_context_for_llm(query=args.message)
-    payload = {
-        "model": args.model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": args.message},
-        ],
-    }
+    ) as manager:
+        manager.add_user_message(args.message)
+        system_prompt = manager.build_context_for_llm(query=args.message)
+        payload = {
+            "model": args.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": args.message},
+            ],
+        }
 
-    result = post_json(f"{args.host.rstrip('/')}/chat/completions", payload)
-    answer = result["choices"][0]["message"]["content"]
-    manager.add_assistant_message(answer)
-    manager.compact_hot_to_warm()
-    manager.index_warm_to_cold()
+        result = post_json(f"{args.host.rstrip('/')}/chat/completions", payload)
+        answer = result["choices"][0]["message"]["content"]
+        manager.add_assistant_message(answer)
+        # Auto-cascade handles warm→cold indexing automatically.
+        manager.compact_hot_to_warm()
 
     print(answer)
 

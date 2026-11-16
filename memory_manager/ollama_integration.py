@@ -1,4 +1,4 @@
-"""Prompt/tool adapter for Ollama-style chat clients."""
+"""Prompt/tool adapter for any local LLM chat client."""
 
 from __future__ import annotations
 
@@ -8,8 +8,13 @@ from .orchestrator import TieredMemoryManager
 from .storage import estimate_tokens
 
 
-class OllamaIntegration:
-    """Prepare memory context and tool schemas for an Ollama chat call."""
+class LLMIntegration:
+    """Prepare memory context and tool schemas for a local LLM chat call.
+
+    Works with any chat backend (Ollama, LM Studio, LocalAI, vLLM, etc.).
+    The returned system prompt and tool definitions use the OpenAI tool
+    schema format, which is supported by all major local inference servers.
+    """
 
     def __init__(self, memory_manager: TieredMemoryManager, primary_model: str = "qwen2.5:7b"):
         self.memory_manager = memory_manager
@@ -63,3 +68,8 @@ class OllamaIntegration:
         if name == "tag_memory_entry":
             return self.memory_manager.hot_buffer.tag_entry(arguments["entry_id"], arguments["tag"])
         raise ValueError(f"Unknown memory tool: {name}")
+
+
+# Backward-compatible alias — existing code importing OllamaIntegration
+# will continue to work without modification.
+OllamaIntegration = LLMIntegration
